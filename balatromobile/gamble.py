@@ -37,8 +37,10 @@ def android(args: Namespace):
         with ZipFile(balatro_exe, "r") as z:
             z.extractall(balatro)
         balatro_version = get_balatro_version(balatro)
+
         for patch in patches:
             patch.apply(balatro, balatro_version, args.force)
+
         app = Path(d) / "balatro_app"
         run_silent(["java", "-jar", artifacts.apk_editor.absolute(), "d", "-i", artifacts.love_apk.absolute(), "-o", app.absolute()])
         manifest_tpl = artifacts.android_manifest.read_text()
@@ -50,21 +52,43 @@ def android(args: Namespace):
         apk = Path(d) / "balatro.apk"
         run_silent(["java", "-jar", artifacts.apk_editor.absolute(), "b", "-i", app.absolute(), "-o", apk.absolute()])
         output_apk = Path(args.output) if args.output else Path(f"balatro-{balatro_version}.apk")
+
         if args.skip_sign:
             shutil.move(apk.absolute(), output_apk.absolute())
-        else:
-            zipaligned_apk = Path(d) / "balatro-aligned.apk"
-            run_silent([artifacts.zipalign.absolute(), "-i", apk.absolute(), "-o", zipaligned_apk.absolute()])
-            signed_apk = Path(d) / "balatro-aligned-debugSigned.apk"
-            run_silent([
-                "java", "-jar", artifacts.apksigner.absolute(), "sign",
-                "--ks-key-alias", "androiddebugkey",
-                "--ks", artifacts.uber_keystore.absolute(),
-                "--ks-pass", "pass:android",
-                "--out", signed_apk.absolute(),
-                zipaligned_apk.absolute()
-            ])
-            shutil.move(signed_apk, output_apk)
+            return
+
+        keystore = artifacts.uber_keystore
+        keystore_pass = "pass:android"
+        keystore_key_alias = "androiddebugkey"
+        if args.custom_keystore:
+            from os import environ
+
+            missing_env_vars = []
+            if not (keystore_path := environ.get("BALATROMOBILE_KS")):
+                missing_env_vars.append("BALATROMOBILE_KS")
+            if not environ.get("BALATROMOBILE_KS_PASS"):
+                missing_env_vars.append("BALATROMOBILE_KS_PASS")
+            if not (keystore_key_alias := environ.get("BALATROMOBILE_KS_ALIAS")):
+                missing_env_vars.append("BALATROMOBILE_KS_ALIAS")
+
+            if missing_env_vars:
+                raise Exception(f"Missing required env vars: {', '.join(missing_env_vars)}")
+
+            keystore = Path(keystore_path)
+            keystore_pass = "env:BALATROMOBILE_KS_PASS"
+
+        zipaligned_apk = Path(d) / "balatro-aligned.apk"
+        run_silent([artifacts.zipalign.absolute(), "-i", apk.absolute(), "-o", zipaligned_apk.absolute()])
+        signed_apk = Path(d) / "balatro-aligned-debugSigned.apk"
+        run_silent([
+            "java", "-jar", artifacts.apksigner.absolute(), "sign",
+            "--ks", keystore.absolute(),
+            "--ks-pass", keystore_pass,
+            "--ks-key-alias", keystore_key_alias,
+            "--out", signed_apk.absolute(),
+            zipaligned_apk.absolute()
+        ])
+        shutil.move(signed_apk, output_apk)
 
 def list_patches(args: Namespace):
     print(tabulate(
@@ -83,11 +107,15 @@ def parse_args() -> Namespace:
     android.add_argument("--output", "-o", required=False, help="Output path for apk (default: balatro-GAME_VERSION.apk)")
     android.add_argument("--patches", "-p", default=DEFAULT_PATCHES, help="Comma-separated list of patches to apply (default: %(default)s)")
     android.add_argument("--skip-sign", "-s", action="store_true", help="Skip signing the apk file with Uber Apk Signer (default: %(default)s)")
+    android.add_argument("--custom-keystore", "-k", action="store_true", help=(
+        "Whether to use the Uber APK Signer debug keystore or an external one defined by the env vars "
+        + "`BALATROMOBILE_KS`, `BALATROMOBILE_KS_ALIAS` & `BALATROMOBILE_KS_PASS` (default: %(default)s)"
+    ))
     android.add_argument("--display-name", default="Balatro Mobile (unofficial)", help="Change application display name (default: %(default)s)")
     android.add_argument("--package-name", default="dev.bootkit.balatro", help="Change application package name (default: %(default)s)")
     android.add_argument("--force", "-f", action="store_true", help="Force apply patches even if not compatible with supplied Balatro.exe version (default: %(default)s)")
     # list-patches
-    android = commands.add_parser('list-patches', help='List available patches')
+    _ = commands.add_parser('list-patches', help='List available patches')
     return parser.parse_args()
 
 if __name__=="__main__":
